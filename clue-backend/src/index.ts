@@ -120,29 +120,3 @@ console.log(`✅ Server running at http://localhost:${port}`);
 console.log(`📊 Health check: http://localhost:${port}/health/detailed`);
 
 export default app;
-
-// 404 handler
-app.notFound((c) => c.json({ error: 'Not found' }, 404));
-
-// Error handler
-app.onError((err, c) => {
-  console.error('Server error:', err);
-  return c.json({ error: 'Internal server error' }, 500);
-});
-
-// Start server
-const port = Number(env.PORT);
-console.log(`🚀 Clue backend starting on port ${port}`);
-
-serve({ fetch: app.fetch, port });
-
-// Start background jobs
-if (env.NODE_ENV === 'production') {
-  startScheduler();
-  startDeliveryScheduler();
-}
-
-console.log(`✅ Server running at http://localhost:${port}`);
-console.log(`📊 Health check: http://localhost:${port}/health/detailed`);
-
-export default app;
