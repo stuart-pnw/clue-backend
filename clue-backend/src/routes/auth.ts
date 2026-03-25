@@ -95,6 +95,7 @@ async function generateCodeChallenge(verifier: string): Promise<string> {
 }
 
 const codeVerifiers = new Map<string, string>();
+const xConnectVerifiers = new Map<string, string>();
 
 auth.get('/x', async (c) => {
   const state = crypto.randomUUID();
@@ -313,6 +314,95 @@ auth.get('/callback/linkedin', async (c) => {
 });
 
 // Connect LinkedIn (for existing users)
+
+auth.get('/connect/x', async (c) => {
+  const token = c.req.query('token') || extractToken(c.req.header('Authorization'));
+  if (!token) return c.json({ error: 'Unauthorized' }, 401);
+
+  const payload = await verifyToken(token);
+  if (!payload) return c.json({ error: 'Invalid token' }, 401);
+
+  const state = `connect:${payload.sub}:${crypto.randomUUID()}`;
+  const codeVerifier = generateCodeVerifier();
+  const codeChallenge = await generateCodeChallenge(codeVerifier);
+
+  xConnectVerifiers.set(state, codeVerifier);
+
+  const params = new URLSearchParams({
+    response_type: 'code',
+    client_id: env.X_CLIENT_ID,
+    redirect_uri: `${env.CALLBACK_URL}/x/connect`,
+    scope: 'tweet.read users.read follows.read offline.access',
+    state,
+    code_challenge: codeChallenge,
+    code_challenge_method: 'S256',
+  });
+
+  return c.redirect(`https://twitter.com/i/oauth2/authorize?${params}`);
+});
+
+auth.get('/callback/x/connect', async (c) => {
+  const code = c.req.query('code');
+  const state = c.req.query('state');
+
+  if (!code || !state) return c.json({ error: 'Missing code or state' }, 400);
+
+  const codeVerifier = xConnectVerifiers.get(state);
+  if (!codeVerifier) return c.json({ error: 'Invalid state' }, 400);
+
+  xConnectVerifiers.delete(state);
+
+  const [, userId] = state.split(':');
+  if (!userId) return c.json({ error: 'Invalid state format' }, 400);
+
+  try {
+    const basicAuth = btoa(`${env.X_CLIENT_ID}:${env.X_CLIENT_SECRET}`);
+
+    const tokenRes = await fetch('https://api.twitter.com/2/oauth2/token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Authorization: `Basic ${basicAuth}`,
+      },
+      body: new URLSearchParams({
+        code,
+        grant_type: 'authorization_code',
+        client_id: env.X_CLIENT_ID,
+        redirect_uri: `${env.CALLBACK_URL}/x/connect`,
+        code_verifier: codeVerifier,
+      }),
+    });
+
+    const tokens = await tokenRes.json() as {
+      access_token: string; refresh_token: string; expires_in: number;
+    };
+
+    const userRes = await fetch('https://api.twitter.com/2/users/me?user.fields=profile_image_url', {
+      headers: { Authorization: `Bearer ${tokens.access_token}` },
+    });
+
+    const { data: xUser } = await userRes.json() as {
+      data: { id: string; name: string; username: string; profile_image_url: string };
+    };
+
+    await upsertConnectedAccount({
+      user_id: userId,
+      platform: 'x',
+      platform_user_id: xUser.id,
+      platform_username: xUser.username,
+      access_token: tokens.access_token,
+      refresh_token: tokens.refresh_token,
+      token_expires_at: new Date(Date.now() + tokens.expires_in * 1000).toISOString(),
+      scopes: ['tweet.read', 'users.read', 'follows.read', 'offline.access'],
+    });
+
+    return c.redirect(`${env.APP_URL}/auth/success`);
+  } catch (error) {
+    console.error('X connect callback error:', error);
+    return c.json({ error: 'Failed to connect X account' }, 500);
+  }
+});
+
 auth.get('/connect/linkedin', async (c) => {
   const token = extractToken(c.req.header('Authorization'));
   if (!token) return c.json({ error: 'Unauthorized' }, 401);
