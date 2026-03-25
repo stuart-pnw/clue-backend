@@ -95,7 +95,6 @@ async function generateCodeChallenge(verifier: string): Promise<string> {
 }
 
 const codeVerifiers = new Map<string, string>();
-const xConnectVerifiers = new Map<string, string>();
 
 auth.get('/x', async (c) => {
   const state = crypto.randomUUID();
@@ -322,11 +321,12 @@ auth.get('/connect/x', async (c) => {
   const payload = await verifyToken(token);
   if (!payload) return c.json({ error: 'Invalid token' }, 401);
 
-  const state = `connect:${payload.sub}:${crypto.randomUUID()}`;
   const codeVerifier = generateCodeVerifier();
   const codeChallenge = await generateCodeChallenge(codeVerifier);
 
-  xConnectVerifiers.set(state, codeVerifier);
+  // Embed codeVerifier in state — no in-memory storage, survives server restarts
+  const nonce = crypto.randomUUID();
+  const state = `connect:${payload.sub}:${nonce}:${codeVerifier}`;
 
   const params = new URLSearchParams({
     response_type: 'code',
@@ -347,13 +347,13 @@ auth.get('/callback/x/connect', async (c) => {
 
   if (!code || !state) return c.json({ error: 'Missing code or state' }, 400);
 
-  const codeVerifier = xConnectVerifiers.get(state);
-  if (!codeVerifier) return c.json({ error: 'Invalid state' }, 400);
+  // State: connect:userId:nonce:codeVerifier  (no in-memory lookup)
+  const parts = state.split(':');
+  if (parts.length < 4 || parts[0] !== 'connect') return c.json({ error: 'Invalid state format' }, 400);
 
-  xConnectVerifiers.delete(state);
-
-  const [, userId] = state.split(':');
-  if (!userId) return c.json({ error: 'Invalid state format' }, 400);
+  const userId = parts[1];
+  const codeVerifier = parts.slice(3).join(':');
+  if (!userId || !codeVerifier) return c.json({ error: 'Invalid state' }, 400);
 
   try {
     const basicAuth = btoa(`${env.X_CLIENT_ID}:${env.X_CLIENT_SECRET}`);
@@ -377,6 +377,11 @@ auth.get('/callback/x/connect', async (c) => {
       access_token: string; refresh_token: string; expires_in: number;
     };
 
+    if (!tokens.access_token) {
+      console.error('[X connect] Token exchange failed:', JSON.stringify(tokens));
+      return c.json({ error: 'Token exchange failed', details: tokens }, 500);
+    }
+
     const userRes = await fetch('https://api.twitter.com/2/users/me?user.fields=profile_image_url', {
       headers: { Authorization: `Bearer ${tokens.access_token}` },
     });
@@ -398,7 +403,7 @@ auth.get('/callback/x/connect', async (c) => {
 
     return c.redirect(`${env.APP_URL}/auth/success`);
   } catch (error) {
-    console.error('X connect callback error:', error);
+    console.error('[X connect] Callback error:', error);
     return c.json({ error: 'Failed to connect X account' }, 500);
   }
 });
